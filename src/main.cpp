@@ -8,6 +8,8 @@
 #include "Eigen-3.3/Eigen/Core"
 #include "Eigen-3.3/Eigen/QR"
 #include "json.hpp"
+#include "spline.h"
+#include "helpers.h"
 
 using namespace std;
 
@@ -209,12 +211,12 @@ int main() {
 
       if (s != "") {
         auto j = json::parse(s);
-        
+
         string event = j[0].get<string>();
-        
+
         if (event == "telemetry") {
           // j[1] is the data JSON object
-          
+
         	// Main car's localization Data
           	double car_x = j[1]["x"];
           	double car_y = j[1]["y"];
@@ -226,7 +228,7 @@ int main() {
           	// Previous path data given to the Planner
           	auto previous_path_x = j[1]["previous_path_x"];
           	auto previous_path_y = j[1]["previous_path_y"];
-          	// Previous path's end s and d values 
+          	// Previous path's end s and d values
           	double end_path_s = j[1]["end_path_s"];
           	double end_path_d = j[1]["end_path_d"];
 
@@ -239,7 +241,180 @@ int main() {
           	vector<double> next_y_vals;
 
 
-          	// TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
+            tk::spline splineX, splineY, splineDX, splineDY;
+            splineX.set_points(map_waypoints_s, map_waypoints_x);
+            splineY.set_points(map_waypoints_s, map_waypoints_y);
+            splineDX.set_points(map_waypoints_s, map_waypoints_dx);
+            splineDY.set_points(map_waypoints_s, map_waypoints_dy);
+
+            // for (int i=0; i<sensor_fusion.size(); i++) {
+            //   cout << sensor_fusion[i][0] << " lane " << sensor_fusion[i][6] << endl;
+            // }
+
+            cout << "previous path length: " << previous_path_x.size() << endl;
+
+            for (int i=0; i<min((int)previous_path_x.size(), 6); i++) {
+              next_x_vals.push_back(previous_path_x[i]);
+              next_y_vals.push_back(previous_path_y[i]);
+              cout << " x: " << previous_path_x[i] << " y " << previous_path_y[i] << endl;
+
+            }
+
+            int lane_width = 4;
+            int lane_1_multiple = lane_width/2;
+            int lane_2_multiple = lane_width/2 + lane_width;
+            int lane_3_multiple = lane_width/2 + 2*lane_width;
+
+            double numPlanningPoints = 60-next_x_vals.size(); // 0.6 s lookahead
+            double dt = 0.02; // 20 ms
+            double targetSpeed = 40; // meters per second
+
+            // set goal s
+            double goal_s = car_s + targetSpeed * numPlanningPoints * dt;
+            for (int i=0; i<sensor_fusion.size(); i++) {
+              double other_vehicle_s = sensor_fusion[i][5];
+              other_vehicle_s -= 4; // measure from back of car
+              double other_vehicle_d = sensor_fusion[i][6];
+              if (fabs(other_vehicle_d - lane_2_multiple) <= 2) {
+                // in our lane
+                if (other_vehicle_s > car_s && other_vehicle_s < goal_s) {
+                  goal_s = other_vehicle_s;
+                }
+              }
+            }
+
+            double goal_s_dot = targetSpeed;
+            double goal_s_dot_dot = 0;
+            double goal_dx = splineDX(goal_s);
+            double goal_dy = splineDY(goal_s);
+
+            double start_dx, start_dy;
+            double start_s = car_s;
+            double start_x = car_x;
+            double start_y = car_y;
+            double start_x_dot = cos(car_yaw) * car_speed;
+            double start_y_dot = sin(car_yaw) * car_speed;
+            if (next_x_vals.size() > 1) {
+              start_s = car_s + targetSpeed * next_x_vals.size() * dt;
+              start_x = next_x_vals[next_x_vals.size()-1];
+              start_y = next_y_vals[next_y_vals.size()-1];
+              start_x_dot = (next_x_vals[next_x_vals.size()-1] - next_x_vals[next_x_vals.size()-2])/dt;
+              start_y_dot = (next_y_vals[next_y_vals.size()-1] - next_y_vals[next_y_vals.size()-2])/dt;
+            } else {
+              start_s = car_s;
+              start_dx = splineDX(car_s);
+              start_dy = splineDY(car_s);
+            }
+
+            double mid_s = start_s + 0.5*(goal_s-start_s);
+
+            double goal_x = splineX(goal_s) + lane_2_multiple*goal_dx;
+            double goal_y = splineY(goal_s) + lane_2_multiple*goal_dy;
+
+            double mid_x = splineX(mid_s) + lane_2_multiple*goal_dx;
+            double mid_y = splineY(mid_s) + lane_2_multiple*goal_dy;
+
+            double goal_x_dot = (goal_dx*cos(0.5*M_PI)-goal_dy*sin(0.5*M_PI)) * goal_s_dot;
+            double goal_y_dot = (goal_dx*sin(0.5*M_PI)+goal_dy*cos(0.5*M_PI)) * goal_s_dot;
+
+            cout << "start_s: " << start_s << " goal_s: " << goal_s << endl;
+            cout << "start_x: " << start_x << " goal_x: " << goal_s << endl;
+            cout << "start_y: " << start_y << " goal_y: " << goal_y << endl;
+
+            vector<double> start = { car_s, 5, 0 };
+            vector<double> end = { goal_s, goal_s_dot, 0 };
+
+            vector<double> startX = { start_x, start_x_dot, 0 };
+            vector<double> endX = { goal_x, goal_x_dot, 0 };
+
+            vector<double> startY = { start_y, start_y_dot, 0 };
+            vector<double> endY = { goal_y, goal_y_dot, 0 };
+
+            cout << start_x_dot << " " << start_y_dot << " goal_x_dot " << goal_x_dot << " " << goal_y_dot << endl;
+
+            // // Coefficients s_coeff = JMT(start, end, dt*numPlanningPoints);
+            // Coefficients x_coeff = JMT(startX, endX, dt*numPlanningPoints);
+            // Coefficients y_coeff = JMT(startY, endY, dt*numPlanningPoints);
+
+            // cout << "xcoeff" << endl << x_coeff << endl << endl;
+            // cout << "ycoeff" << endl << y_coeff << endl << endl;
+
+            VectorXd t_vals(3);
+            VectorXd x_vals(3);
+            VectorXd y_vals(3);
+            VectorXd s_vals(3);
+            t_vals << 0, 0.5*dt*numPlanningPoints, dt*numPlanningPoints;
+            x_vals << start_x, mid_x, goal_x;
+            y_vals << start_y, mid_y, goal_y;
+            s_vals << start_s, mid_s, goal_s;
+            // Coefficients x_coeff = polyfit(t_vals, x_vals, 1);
+            // Coefficients y_coeff = polyfit(t_vals, y_vals, 1);
+            Coefficients s_coeff = polyfit(t_vals, s_vals, 1);
+
+            tk::spline splinePartialX, splinePartialY;
+            splinePartialX.set_points({start_s, mid_s, goal_s}, {start_x, mid_x, goal_x});
+            splinePartialY.set_points({start_s, mid_s, goal_s}, {start_y, mid_y, goal_y});
+
+            double current_speed = min(car_speed, targetSpeed);
+            double current_s = car_s;
+            double acceleration = 0.0;
+            for (int i=1; i<numPlanningPoints; i++) {
+              // double s = current_s;
+              // current_s += current_speed * dt;
+              // if (current_speed < targetSpeed) {
+              //   current_speed += acceleration * dt;
+              // } else {
+              //   current_speed -= acceleration * dt;
+              // }
+
+              // double x = polyeval(x_coeff, dt*i);
+              // double y = polyeval(y_coeff, dt*i);
+              double s = polyeval(s_coeff, dt*i);
+              // double x = splineX(s) + lane_2_multiple*splineDX(s);
+              // double y = splineY(s) + lane_2_multiple*splineDY(s);
+
+              double x = splinePartialX(s);
+              double y = splinePartialY(s);
+
+              next_x_vals.push_back(x);
+              next_y_vals.push_back(y);
+              cout << "s " << s << " x: " << x << " y " << y << " current_speed " << current_speed << " a: " << acceleration*dt << endl;
+            }
+
+            cout << endl;
+
+            int interpolate_count = 100;
+            int lookahead = 1000;
+            int i_start = car_s * interpolate_count + 1;
+            // cout << i_start << " " << i_start+lookahead << endl;
+
+            // for (int i=i_start; i<i_start+lookahead; i++) {
+            //   int wrapped_i = i % ((map_waypoints_s.size()-1)*interpolate_count);
+            //   int s_i = floor(float(wrapped_i) / interpolate_count);
+            //   int partial_i = wrapped_i % interpolate_count;
+            //   double s0 = map_waypoints_s[s_i];
+            //   double s1 = map_waypoints_s[s_i+1];
+            //   double s = s0 + partial_i * (s1-s0)/interpolate_count;
+            //   next_x_vals.push_back(sX(s)+map_waypoints_dx[s_i]*lane_2_multiple);
+            //   next_y_vals.push_back(sY(s)+map_waypoints_dy[s_i]*lane_2_multiple);
+            //   cout << sX(s)+map_waypoints_dx[s_i]*lane_2_multiple << endl;
+            // }
+
+
+            for (auto i=0; i<next_x_vals.size()-2; i++) {
+              auto dx = next_x_vals[i+1] - next_x_vals[i];
+              auto dy = next_y_vals[i+1] - next_y_vals[i];
+
+              auto ax = (next_x_vals[i+2] - next_x_vals[i+1]) - dx;
+              auto ay = (next_y_vals[i+2] - next_y_vals[i+1]) - dy;
+
+
+              if (sqrt(ax*ax+ay*ay) > 0.2) {
+                cout << "i: " << i << " ax: " << ax << " ay: " << ay << " dx: " << dx << " dy: " << dy << endl;
+              }
+            }
+
+
           	msgJson["next_x"] = next_x_vals;
           	msgJson["next_y"] = next_y_vals;
 
@@ -247,7 +422,7 @@ int main() {
 
           	//this_thread::sleep_for(chrono::milliseconds(1000));
           	ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
-          
+
         }
       } else {
         // Manual driving
