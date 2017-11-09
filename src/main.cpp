@@ -198,9 +198,7 @@ int main() {
   	map_waypoints_dy.push_back(d_y);
   }
 
-  DriveState state = DriveState::Straight;
-
-  h.onMessage([&state, &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
+  h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
@@ -269,43 +267,10 @@ int main() {
 
             double numPlanningPoints = 60-next_x_vals.size(); // 0.6 s lookahead
             double dt = 0.02; // 20 ms
-            double max_jerk = 10.0;
-            // max_jerk
-            // acceleration = max_jerk*time
-            // speed = 0.5 * max_jerk*pow(time, 2) + current_speed
-            // distance = 1 / 6 * max_jerk*pow(time, 3) + time*current_speed;
-            double minSpeed = - 1.0/2.0 * max_jerk * pow(numPlanningPoints*dt, 2) + car_speed;
-            double maxSpeed = 1.0/2.0 * max_jerk * pow(numPlanningPoints*dt, 2) + car_speed;
-            cout << minSpeed << " < speed < " << maxSpeed << endl;
-
-            double minDistance = - 1.0/6.0 * max_jerk * pow(numPlanningPoints*dt, 3) + numPlanningPoints*dt*car_speed;
-            double maxDistance = 1.0/6.0 * max_jerk * pow(numPlanningPoints*dt, 3) + numPlanningPoints*dt*car_speed;
-            cout << minDistance << " < distance < " << maxDistance << endl;
-            double targetSpeed = 20; // meters per second
-
-            double start_dx, start_dy;
-            double start_s;
-            double start_x = car_x;
-            double start_y = car_y;
-            double start_x_dot = cos(car_yaw) * car_speed;
-            double start_y_dot = sin(car_yaw) * car_speed;
-            double start_s_dot;
-            if (next_x_vals.size() > 1) {
-              start_s = car_s + targetSpeed * next_x_vals.size() * dt;
-              start_x = next_x_vals[next_x_vals.size()-1];
-              start_y = next_y_vals[next_y_vals.size()-1];
-              start_x_dot = (next_x_vals[next_x_vals.size()-1] - next_x_vals[next_x_vals.size()-2])/dt;
-              start_y_dot = (next_y_vals[next_y_vals.size()-1] - next_y_vals[next_y_vals.size()-2])/dt;
-              start_s_dot = sqrt(start_x_dot*start_x_dot+start_y_dot*start_y_dot);
-            } else {
-              start_s = car_s;
-              start_s_dot = car_speed;
-              start_dx = splineDX(car_s);
-              start_dy = splineDY(car_s);
-            }
+            double targetSpeed = 40; // meters per second
 
             // set goal s
-            double goal_s = start_s + max(minDistance, min(maxDistance, targetSpeed * numPlanningPoints * dt));
+            double goal_s = car_s + targetSpeed * numPlanningPoints * dt;
             for (int i=0; i<sensor_fusion.size(); i++) {
               double other_vehicle_s = sensor_fusion[i][5];
               other_vehicle_s -= 4; // measure from back of car
@@ -318,26 +283,46 @@ int main() {
               }
             }
 
-            double goal_s_dot = max(minSpeed, min(maxSpeed, targetSpeed));
+            double goal_s_dot = targetSpeed;
             double goal_s_dot_dot = 0;
             double goal_dx = splineDX(goal_s);
             double goal_dy = splineDY(goal_s);
 
+            double start_dx, start_dy;
+            double start_s = car_s;
+            double start_x = car_x;
+            double start_y = car_y;
+            double start_x_dot = cos(car_yaw) * car_speed;
+            double start_y_dot = sin(car_yaw) * car_speed;
+            if (next_x_vals.size() > 1) {
+              start_s = car_s + targetSpeed * next_x_vals.size() * dt;
+              start_x = next_x_vals[next_x_vals.size()-1];
+              start_y = next_y_vals[next_y_vals.size()-1];
+              start_x_dot = (next_x_vals[next_x_vals.size()-1] - next_x_vals[next_x_vals.size()-2])/dt;
+              start_y_dot = (next_y_vals[next_y_vals.size()-1] - next_y_vals[next_y_vals.size()-2])/dt;
+            } else {
+              start_s = car_s;
+              start_dx = splineDX(car_s);
+              start_dy = splineDY(car_s);
+            }
+
+            double mid_s = start_s + 0.5*(goal_s-start_s);
+
             double goal_x = splineX(goal_s) + lane_2_multiple*goal_dx;
             double goal_y = splineY(goal_s) + lane_2_multiple*goal_dy;
+
+            double mid_x = splineX(mid_s) + lane_2_multiple*goal_dx;
+            double mid_y = splineY(mid_s) + lane_2_multiple*goal_dy;
 
             double goal_x_dot = (goal_dx*cos(0.5*M_PI)-goal_dy*sin(0.5*M_PI)) * goal_s_dot;
             double goal_y_dot = (goal_dx*sin(0.5*M_PI)+goal_dy*cos(0.5*M_PI)) * goal_s_dot;
 
             cout << "start_s: " << start_s << " goal_s: " << goal_s << endl;
-            cout << "start_s_dot: " << start_s_dot << " goal_s_dot: " << goal_s_dot << endl;
-            cout << "start_x: " << start_x << " goal_x: " << goal_x << endl;
+            cout << "start_x: " << start_x << " goal_x: " << goal_s << endl;
             cout << "start_y: " << start_y << " goal_y: " << goal_y << endl;
 
-            vector<double> startS = { start_s, start_s_dot, 0 };
-            vector<double> endS = { goal_s, goal_s_dot, 0 };
-
-            vector<double> startD = { car_d, 0, 0 };
+            vector<double> start = { car_s, 5, 0 };
+            vector<double> end = { goal_s, goal_s_dot, 0 };
 
             vector<double> startX = { start_x, start_x_dot, 0 };
             vector<double> endX = { goal_x, goal_x_dot, 0 };
@@ -347,106 +332,73 @@ int main() {
 
             cout << start_x_dot << " " << start_y_dot << " goal_x_dot " << goal_x_dot << " " << goal_y_dot << endl;
 
-            // Coefficients s_coeff = JMT(startS, endS, dt*numPlanningPoints);
+            // // Coefficients s_coeff = JMT(start, end, dt*numPlanningPoints);
             // Coefficients x_coeff = JMT(startX, endX, dt*numPlanningPoints);
             // Coefficients y_coeff = JMT(startY, endY, dt*numPlanningPoints);
 
             // cout << "xcoeff" << endl << x_coeff << endl << endl;
             // cout << "ycoeff" << endl << y_coeff << endl << endl;
 
-            // double mid_s = polyeval(s_coeff, 0.5*numPlanningPoints*dt);
-            double mid_s = start_s + 0.5*(goal_s-start_s);
-            double mid_x = splineX(mid_s) + lane_2_multiple*goal_dx;
-            double mid_y = splineY(mid_s) + lane_2_multiple*goal_dy;
-
-            Path path = PTG(state, startS, startD, sensor_fusion, numPlanningPoints*dt);
-
-            VectorXd t_vals(5);
+            VectorXd t_vals(3);
             VectorXd x_vals(3);
             VectorXd y_vals(3);
-            VectorXd s_vals(5);
-            t_vals << -dt, 0, 0.5*dt*numPlanningPoints, dt*numPlanningPoints, dt+dt*numPlanningPoints;
+            VectorXd s_vals(3);
+            t_vals << 0, 0.5*dt*numPlanningPoints, dt*numPlanningPoints;
             x_vals << start_x, mid_x, goal_x;
             y_vals << start_y, mid_y, goal_y;
-            s_vals << start_s-car_speed*dt, start_s, mid_s, goal_s, goal_s;
+            s_vals << start_s, mid_s, goal_s;
             // Coefficients x_coeff = polyfit(t_vals, x_vals, 1);
             // Coefficients y_coeff = polyfit(t_vals, y_vals, 1);
-            Coefficients s_coeff = polyfit(t_vals, s_vals, 2);
+            Coefficients s_coeff = polyfit(t_vals, s_vals, 1);
 
             tk::spline splinePartialX, splinePartialY;
             splinePartialX.set_points({start_s, mid_s, goal_s}, {start_x, mid_x, goal_x});
             splinePartialY.set_points({start_s, mid_s, goal_s}, {start_y, mid_y, goal_y});
 
-            double current_speed = car_speed;
-            double current_s = start_s;
+            double current_speed = min(car_speed, targetSpeed);
+            double current_s = car_s;
             double acceleration = 0.0;
-            double max_acceleration = 10.0;
+            for (int i=1; i<numPlanningPoints; i++) {
+              // double s = current_s;
+              // current_s += current_speed * dt;
+              // if (current_speed < targetSpeed) {
+              //   current_speed += acceleration * dt;
+              // } else {
+              //   current_speed -= acceleration * dt;
+              // }
 
-            Coefficients path_s_coeff, path_d_coeff;
-            double path_T;
-            tie(path_s_coeff, path_d_coeff, path_T) = path;
+              // double x = polyeval(x_coeff, dt*i);
+              // double y = polyeval(y_coeff, dt*i);
+              double s = polyeval(s_coeff, dt*i);
+              // double x = splineX(s) + lane_2_multiple*splineDX(s);
+              // double y = splineY(s) + lane_2_multiple*splineDY(s);
 
-            Coefficients path_s_dot_coeff = differentiate(path_s_coeff);
-            Coefficients path_s_dot_dot_coeff = differentiate(path_s_dot_coeff);
-            Coefficients path_s_jerk_coeff = differentiate(path_s_dot_dot_coeff);
+              double x = splinePartialX(s);
+              double y = splinePartialY(s);
 
-            for (double t=0; t<path_T; t+= dt) {
-
-                double s = polyeval(path_s_coeff, t);
-                double d = polyeval(path_d_coeff, t);
-                // double x = splineX(s) + lane_2_multiple*splineDX(s);
-                // double y = splineY(s) + lane_2_multiple*splineDY(s);
-
-                double x = splinePartialX(s);
-                double y = splinePartialY(s);
-
-                next_x_vals.push_back(x);
-                next_y_vals.push_back(y);
-                cout << "s " << s << " x: " << x << " y " << y << " speed " << polyeval(path_s_dot_coeff, t) << " a: " << polyeval(path_s_dot_dot_coeff, t) << " jerk: " << polyeval(path_s_jerk_coeff, t) << endl;
+              next_x_vals.push_back(x);
+              next_y_vals.push_back(y);
+              cout << "s " << s << " x: " << x << " y " << y << " current_speed " << current_speed << " a: " << acceleration*dt << endl;
             }
-            //
-            // for (int i=1; i<numPlanningPoints; i++) {
-            //   // acceleration = min(max_acceleration, acceleration+dt*max_jerk);
-            //   // if (current_speed < targetSpeed) {
-            //   //   current_speed += acceleration * dt;
-            //   // } else {
-            //   //   current_speed -= acceleration * dt;
-            //   // }
-            //   // current_s += current_speed * dt;
-            //
-            //   // double x = polyeval(x_coeff, dt*i);
-            //   // double y = polyeval(y_coeff, dt*i);
-            //   double s = polyeval(s_coeff, dt*i);
-            //   // double x = splineX(s) + lane_2_multiple*splineDX(s);
-            //   // double y = splineY(s) + lane_2_multiple*splineDY(s);
-            //
-            //   double x = splinePartialX(s);
-            //   double y = splinePartialY(s);
-            //
-            //   next_x_vals.push_back(x);
-            //   next_y_vals.push_back(y);
-            //   // cout << "s " << s << " x: " << x << " y " << y << " current_speed " << current_speed << " a: " << acceleration*dt << endl;
-            //   cout << s << endl;
+
+            cout << endl;
+
+            int interpolate_count = 100;
+            int lookahead = 1000;
+            int i_start = car_s * interpolate_count + 1;
+            // cout << i_start << " " << i_start+lookahead << endl;
+
+            // for (int i=i_start; i<i_start+lookahead; i++) {
+            //   int wrapped_i = i % ((map_waypoints_s.size()-1)*interpolate_count);
+            //   int s_i = floor(float(wrapped_i) / interpolate_count);
+            //   int partial_i = wrapped_i % interpolate_count;
+            //   double s0 = map_waypoints_s[s_i];
+            //   double s1 = map_waypoints_s[s_i+1];
+            //   double s = s0 + partial_i * (s1-s0)/interpolate_count;
+            //   next_x_vals.push_back(sX(s)+map_waypoints_dx[s_i]*lane_2_multiple);
+            //   next_y_vals.push_back(sY(s)+map_waypoints_dy[s_i]*lane_2_multiple);
+            //   cout << sX(s)+map_waypoints_dx[s_i]*lane_2_multiple << endl;
             // }
-            //
-            // cout << endl;
-            //
-            // int interpolate_count = 100;
-            // int lookahead = 1000;
-            // int i_start = car_s * interpolate_count + 1;
-            // // cout << i_start << " " << i_start+lookahead << endl;
-            //
-            // // for (int i=i_start; i<i_start+lookahead; i++) {
-            // //   int wrapped_i = i % ((map_waypoints_s.size()-1)*interpolate_count);
-            // //   int s_i = floor(float(wrapped_i) / interpolate_count);
-            // //   int partial_i = wrapped_i % interpolate_count;
-            // //   double s0 = map_waypoints_s[s_i];
-            // //   double s1 = map_waypoints_s[s_i+1];
-            // //   double s = s0 + partial_i * (s1-s0)/interpolate_count;
-            // //   next_x_vals.push_back(sX(s)+map_waypoints_dx[s_i]*lane_2_multiple);
-            // //   next_y_vals.push_back(sY(s)+map_waypoints_dy[s_i]*lane_2_multiple);
-            // //   cout << sX(s)+map_waypoints_dx[s_i]*lane_2_multiple << endl;
-            // // }
 
 
             for (auto i=0; i<next_x_vals.size()-2; i++) {
@@ -457,7 +409,7 @@ int main() {
               auto ay = (next_y_vals[i+2] - next_y_vals[i+1]) - dy;
 
 
-              if (sqrt(ax*ax+ay*ay) > 0.004) {
+              if (sqrt(ax*ax+ay*ay) > 0.2) {
                 cout << "i: " << i << " ax: " << ax << " ay: " << ay << " dx: " << dx << " dy: " << dy << endl;
               }
             }
