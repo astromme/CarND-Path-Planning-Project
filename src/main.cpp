@@ -199,7 +199,17 @@ int main() {
   	map_waypoints_dy.push_back(d_y);
   }
 
+  // wrap map around a bit to fix boundary conditions
+  for (int i=0; i<20; i++) {
+    map_waypoints_x.push_back(map_waypoints_x[i]);
+  	map_waypoints_y.push_back(map_waypoints_y[i]);
+  	map_waypoints_s.push_back(map_waypoints_s[i] + max_s);
+  	map_waypoints_dx.push_back(map_waypoints_dx[i]);
+  	map_waypoints_dy.push_back(map_waypoints_dy[i]);
+  }
+
   int lane = 1;
+  int lane_cooldown = 50;
   double targetSpeed = 0; // meters per second
 
   tk::spline splineX, splineY, splineDX, splineDY;
@@ -208,7 +218,7 @@ int main() {
   splineDX.set_points(map_waypoints_s, map_waypoints_dx);
   splineDY.set_points(map_waypoints_s, map_waypoints_dy);
 
-  h.onMessage([&lane, &targetSpeed, &splineX, &splineY, &splineDX, &splineDY, &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
+  h.onMessage([&lane_cooldown, &lane, &targetSpeed, &splineX, &splineY, &splineDX, &splineDY, &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
@@ -257,9 +267,10 @@ int main() {
 
 
             bool too_close = false;
-            bool lane_0_free = true;
-            bool lane_1_free = true;
-            bool lane_2_free = true;
+            double lane_0_next_car_s = 9999;
+            double lane_1_next_car_s = 9999;
+            double lane_2_next_car_s = 9999;
+            int best_lane = 1;
 
             double lane_d = 2 + 4*lane;
 
@@ -278,44 +289,58 @@ int main() {
                 if (other_vehicle_s > car_s && ((other_vehicle_s-car_s) < 30)) {
                   too_close = true;
                 }
-              } else {
-                if (other_vehicle_s > (car_s - 10) && ((other_vehicle_s-car_s) < 50)) {
-                  if (fabs(other_vehicle_d - 2) < 2) {
-                    lane_0_free = false;
-                  } else if (fabs(other_vehicle_d - 6) < 2) {
-                    lane_1_free = false;
-                  } else if (fabs(other_vehicle_d - 10) < 2) {
-                    lane_2_free = false;
-                  } else {
-                    cout << "invalid lane " << other_vehicle_d << endl;
-                  }
-                }
               }
 
+              if (other_vehicle_s > (car_s - 2)) {
+                if (fabs(other_vehicle_d - 2) < 2) {
+                  lane_0_next_car_s = min(lane_0_next_car_s, other_vehicle_s-car_s);
+                } else if (fabs(other_vehicle_d - 6) < 2) {
+                  lane_1_next_car_s = min(lane_1_next_car_s, other_vehicle_s-car_s);
+                } else if (fabs(other_vehicle_d - 10) < 2) {
+                  lane_2_next_car_s = min(lane_2_next_car_s, other_vehicle_s-car_s);
+                } else {
+                  cout << "invalid lane " << other_vehicle_d << endl;
+                }
+              }
             }
 
-            if (too_close) {
-              if ((lane == 0 || lane == 2) && lane_1_free) {
+            cout << "lane_0_next_car_s: " << lane_0_next_car_s << endl;
+            cout << "lane_1_next_car_s: " << lane_1_next_car_s << endl;
+            cout << "lane_2_next_car_s: " << lane_2_next_car_s << endl;
+
+            if (lane_0_next_car_s > max(lane_1_next_car_s, lane_2_next_car_s)) {
+              best_lane = 0;
+            } else if (lane_1_next_car_s > max(lane_0_next_car_s, lane_2_next_car_s)) {
+              best_lane = 1;
+            } else if (lane_2_next_car_s > max(lane_0_next_car_s, lane_1_next_car_s)) {
+              best_lane = 2;
+            }
+
+            cout << "best lane: " << best_lane << endl;
+
+            if (lane_cooldown > 0) {
+              lane_cooldown -= 1;
+            } else if (lane != best_lane) {
+              if (lane == 0 && lane_1_next_car_s > 40) {
                 lane = 1;
+                lane_cooldown = 50;
               } else if (lane == 1) {
-                if (lane_0_free && lane_2_free) {
-                  if (rand() % 2 == 0) {
-                    lane = 0;
-                  } else {
-                    lane = 1;
-                  }
-                } else if (lane_0_free) {
+                if (best_lane == 0 && lane_0_next_car_s > 40) {
                   lane = 0;
-                } else if (lane_2_free) {
+                  lane_cooldown = 50;
+                } else if (best_lane == 2 && lane_2_next_car_s > 40) {
                   lane = 2;
+                  lane_cooldown = 50;
                 }
+              } else if (lane == 2 && lane_2_next_car_s > 40) {
+                lane = 1;
+                lane_cooldown = 50;
               }
             }
 
             double ref_x = car_x;
             double ref_y = car_y;
             double ref_yaw = car_yaw;
-
 
             cout << "previous path length: " << previous_path_x.size() << endl;
 
@@ -353,15 +378,13 @@ int main() {
             local_spline_y.push_back(splineY(car_s+90) + lane_d*splineDY(car_s+90));
 
             for (int i=0; i<local_spline_x.size(); i++) {
-              cout << "local_spline (global): " << local_spline_x[i] << "," << local_spline_y[i] << endl;
-
               double shift_x = local_spline_x[i] - ref_x;
               double shift_y = local_spline_y[i] - ref_y;
 
               local_spline_x[i] = (shift_x * cos(0-ref_yaw) - shift_y*sin(0-ref_yaw));
               local_spline_y[i] = (shift_x * sin(0-ref_yaw) + shift_y*cos(0-ref_yaw));
 
-              cout << "local_spline: " << local_spline_x[i] << "," << local_spline_y[i] << endl;
+              // cout << "local_spline: " << local_spline_x[i] << "," << local_spline_y[i] << endl;
             }
 
             tk::spline s;
@@ -373,7 +396,7 @@ int main() {
             for (int i=0; i<previous_path_x.size(); i++) {
               next_x_vals.push_back(previous_path_x[i]);
               next_y_vals.push_back(previous_path_y[i]);
-              cout << " x: " << previous_path_x[i] << " y " << previous_path_y[i] << endl;
+              // cout << " x: " << previous_path_x[i] << " y " << previous_path_y[i] << endl;
             }
 
             double target_x = 30;
@@ -411,7 +434,7 @@ int main() {
               next_x_vals.push_back(x_point);
               next_y_vals.push_back(y_point);
 
-              cout << "point: " << x_point << "," << y_point << endl;
+              // cout << "point: " << x_point << "," << y_point << endl;
 
             }
 
